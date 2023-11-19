@@ -89,6 +89,54 @@ bool trySimplifyAddOrSub(Node& node) {
   return true;
 }
 
+/**
+ * Fold a string format node if all its inputs are constant.
+ * 
+ * @pre node is aten::format
+ */
+bool tryFoldFormat(Node& node) {
+  auto inputs = node.inputs();
+  // We only consider constant inputs
+  for (auto input : inputs) {
+    if (input->node()->kind() != prim::Constant) {
+      return false;
+    }
+  }
+
+  // implement c++ version of python format
+  // https://docs.python.org/3/library/string.html#format-string-syntax
+  std::string fmt_str = constant_as<std::string>(inputs[0]).value();
+  std::vector<std::string> fmt_args;
+  bool first = true;
+  for (auto input : inputs) {
+    if (first) {
+      first = false;
+      continue;
+    }
+
+    fmt_args.push_back(constant_as<std::string>(input).value());
+  }
+  // auto format_result = call_format(fmt_str, fmt_args);
+  auto format_result = fmt_args.at(0) + "." + fmt_args.at(1);
+  auto graph = node.owningGraph();
+  WithInsertPoint guard(&node);
+  node.output()->replaceAllUsesWith(graph->insertConstant(format_result));
+
+
+  // std::vector<at::IValue> iv_inputs;
+  // for (auto input : inputs) {
+  //   iv_inputs.push_back(toIValue(input).value());
+  // }
+
+  return true;
+
+  // auto output = node.output();
+  // WithInsertPoint g(&node);
+  // output->replaceAllUsesWith(node.owningGraph()->insertConstant(
+  //     c10::str(iv_inputs).c_str(), output->type()));
+  // return true;
+}
+
 } // namespace
 
 struct PeepholeOptimizeNonTensorImpl {
@@ -268,6 +316,8 @@ struct PeepholeOptimizeNonTensorImpl {
         changed |= trySimplifyMulOrDiv(*node);
       } else if (node->kind() == aten::add || node->kind() == aten::sub) {
         changed |= trySimplifyAddOrSub(*node);
+      } else if (node->kind() == aten::format) {
+        changed |= tryFoldFormat(*node);
       }
     }
     return changed;

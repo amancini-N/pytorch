@@ -11,6 +11,7 @@ class DictNodeImplBase {
   virtual ~DictNodeImplBase() = default;
 
   virtual bool contains(const IValue&) const = 0;
+  virtual bool setitem(const IValue&, Value*) = 0;
   virtual size_t size() const = 0;
   virtual Value* get(const IValue&) const = 0;
 
@@ -51,6 +52,16 @@ class DictNodeImpl : public DictNodeImplBase {
   bool contains(const IValue& ivalue) const override {
     auto key = ivalue_converter_(ivalue);
     return dict_.find(key) != dict_.end();
+  }
+
+  bool setitem(const IValue& ivalue_key, Value* ivalue_value) override {
+    KeyType key = ivalue_converter_(ivalue_key);
+    Value* value = ivalue_value;
+    if (dict_.find(key) == dict_.end()) {
+      dict_.emplace(key, value);
+      return true;
+    }
+    return false;
   }
 
   size_t size() const override {
@@ -132,6 +143,14 @@ class DictNode {
     return c10::nullopt;
   }
 
+  c10::optional<bool> contains(const IValue& key) const {
+    return impl_ && impl_->contains(key);
+  }
+
+  c10::optional<bool> setitem(const IValue& key, Value* value) {
+    return impl_ && impl_->setitem(key, value);
+  }
+
  private:
   std::unique_ptr<DictNodeImplBase> impl_;
 };
@@ -195,6 +214,37 @@ class PeepholeOptimizeDictIdiomsImpl {
     return c10::nullopt;
   }
 
+  c10::optional<bool> checkKeyInDict(Node* dict_creation_node, Value* key) {
+    const DictNode& dict_node = getDictNode(dict_creation_node);
+    auto key_opt = toIValue(key);
+    // Key is not constant if we cannot convert to IValue
+    if (key_opt == c10::nullopt) {
+      return c10::nullopt;
+    }
+    IValue key_ival = *key_opt;
+    if (dict_node.canOptimize()) {
+      return dict_node.contains(key_ival);
+    }
+    return c10::nullopt;
+  }
+
+  c10::optional<bool> setValueInDict(Node* dict_creation_node, Value* key, Value* value) {
+    DictNode& dict_node = const_cast<DictNode&>(getDictNode(dict_creation_node));
+    auto key_opt = toIValue(key);
+    // Key is not constant if we cannot convert to IValue
+    if (key_opt == c10::nullopt) {
+      return c10::nullopt;
+    }
+    auto contains_key = checkKeyInDict(dict_creation_node, key);
+    if (contains_key == c10::nullopt || contains_key)
+      return false;
+    IValue key_ival = *key_opt;
+    if (dict_node.canOptimize()) {
+      return dict_node.setitem(key_ival, value);
+    }
+    return c10::nullopt;
+  }
+
   c10::optional<int64_t> computeLen(Node* dict_creation_node) {
     const DictNode& dict_node = getDictNode(dict_creation_node);
     if (dict_node.canOptimize()) {
@@ -227,9 +277,50 @@ class PeepholeOptimizeDictIdiomsImpl {
     return false;
   }
 
+  bool optimizeContains(Node* contains_node, Node* creation_node) {
+    if (creation_node->kind() == prim::DictConstruct) {
+      auto key = contains_node->input(1);
+      auto value = checkKeyInDict(creation_node, key);
+      if (value != c10::nullopt) {
+        WithInsertPoint guard(contains_node);
+        contains_node->output()->replaceAllUsesWith(graph_->insertConstant(value));
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool optimizeSetItem(Node* setitem_node, Node* creation_node, graph_node_list_iterator& it) {
+    if (creation_node->kind() == prim::DictConstruct) {
+      auto key = setitem_node->input(1);
+      auto value = setitem_node->input(2);
+      c10::optional<bool> result = setValueInDict(creation_node, key, value);
+      if (result != c10::nullopt && result) {
+        size_t inputs_so_far = creation_node->inputs().size();
+        // After these inserts we might violate topological order, need to reorder nodes in block
+        creation_node->insertInput(inputs_so_far, key);
+        if (key->node()->isAfter(creation_node)) {
+          key->node()->moveBefore(creation_node);
+        }
+        creation_node->insertInput(inputs_so_far + 1, value);
+        if (value->node()->isAfter(creation_node)) {
+          value->node()->moveBefore(creation_node);
+        }
+        
+        it.destroyCurrent();
+        return true;
+      }
+      return false;
+      
+    }
+    return false;
+  }
+
   bool runBlock(Block* block) {
     bool changed = false;
-    for (Node* node : block->nodes()) {
+    auto nodes = block->nodes();
+    for (auto it = nodes.begin(); it != nodes.end(); it++) {
+      Node* node = *it;
       for (Block* b : node->blocks()) {
         changed |= runBlock(b);
       }
@@ -241,6 +332,11 @@ class PeepholeOptimizeDictIdiomsImpl {
 
       auto first_input = node->input(0);
 
+      // NOTE: assuming setitem come before all the getitem/contains/len
+      // if (node->kind() == aten::_set_item) {
+      //   changed |= optimizeSetItem(node, first_input->node(), it);
+      // }
+
       // only optimizing ops with unmutated inputs
       if (mutated_dicts_.count(first_input)) {
         continue;
@@ -250,6 +346,8 @@ class PeepholeOptimizeDictIdiomsImpl {
         changed |= optimizeLen(node, first_input->node());
       } else if (node->kind() == aten::__getitem__) {
         changed |= optimizeGetItem(node, first_input->node());
+      } else if (node->kind() == aten::__contains__) {
+        changed |= optimizeContains(node, first_input->node());
       }
     }
     return changed;

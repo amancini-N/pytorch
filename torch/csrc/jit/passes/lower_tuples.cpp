@@ -28,6 +28,7 @@ std::unordered_set<Symbol> supported_ops = {
     prim::Param,
     prim::Return,
     prim::PythonOp,
+    prim::ListConstruct,
     aten::format,
     prim::Uninitialized,
     aten::__getitem__};

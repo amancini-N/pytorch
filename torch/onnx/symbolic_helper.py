@@ -505,6 +505,12 @@ def _as_list_type(jit_type: _C.JitType) -> Optional[_C.ListType]:
     return None
 
 
+def _as_tuple_type(jit_type: _C.JitType) -> Optional[_C.TupleType]:
+    if isinstance(jit_type, _C.TupleType):
+        return jit_type
+    return None
+
+
 @_beartype.beartype
 def _is_list(x: _C.Value) -> bool:
     return _as_list_type(x.type()) is not None
@@ -516,6 +522,18 @@ def _is_tensor_list(x: _C.Value) -> bool:
     if x_type is None:
         return False
     return isinstance(x_type.getElementType(), _C.TensorType)
+
+
+@_beartype.beartype
+def _is_tensor_tuple_list(x: _C.Value) -> bool:
+    x_type = _as_list_type(x.type())
+    if x_type is None:
+        return False
+    tuple_type = x_type.getElementType()
+    inside_type = _as_tuple_type(tuple_type)
+    if inside_type is None:
+        return False
+    return all(isinstance(x, _C.TensorType) for x in inside_type.elements())
 
 
 @_beartype.beartype

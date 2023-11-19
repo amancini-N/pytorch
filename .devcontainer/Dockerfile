@@ -11,7 +11,13 @@ RUN if [ -f "/tmp/conda-tmp/environment.yml" ]; then umask 0002 && /opt/conda/bi
 
 # Tools needed for llvm
 RUN sudo apt-get -y update
-RUN sudo apt install -y lsb-release wget software-properties-common gnupg
+RUN sudo apt install -y lsb-release wget software-properties-common gnupg gdb
+
+RUN PROTOC_ZIP=protoc-21.12-linux-x86_64.zip && \
+    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v21.12/$PROTOC_ZIP && \
+    sudo unzip -o $PROTOC_ZIP -d /usr/local bin/protoc && \
+    sudo unzip -o $PROTOC_ZIP -d /usr/local 'include/*' && \
+    rm -f $PROTOC_ZIP
 
 # Install CLANG if version is specified
 ARG CLANG_VERSION
