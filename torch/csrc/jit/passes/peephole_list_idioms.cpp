@@ -264,8 +264,17 @@ struct PeepholeOptimizeListIdiomsImpl {
         if (auto index = toIValue(node->input(1))) {
           size_t list_size = list_creation_node->inputs().size();
           if (auto norm_index = normalizeIndex(index->toInt(), list_size)) {
-            node->output()->replaceAllUsesWith(
-                list_creation_node->input(*norm_index));
+            size_t n_outputs = node->outputs().size();
+            if (n_outputs > 1) {
+              size_t elem_in_tuple_idx = n_outputs * (*norm_index);
+              for (Value* output : node->outputs()) {
+                output->replaceAllUsesWith(list_creation_node->input(elem_in_tuple_idx++));
+              }
+            }
+            else {
+              node->output()->replaceAllUsesWith(
+                  list_creation_node->input(*norm_index));
+            }
             changed = true;
           }
         }
