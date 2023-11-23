@@ -113,28 +113,60 @@ bool tryFoldFormat(Node& node) {
       first = false;
       continue;
     }
+    std::string constant_value;
+    // dynamic_cast<const c10::StringTypePtr*>(ptr)
+    if (dynamic_cast<const c10::StringType*>(input->type().get())) {
+      constant_value = constant_as<std::string>(input).value();
+    } else if (dynamic_cast<const c10::FloatType*>(input->type().get())){
+      constant_value = std::to_string(constant_as<std::float_t>(input).value());
+    } else if (dynamic_cast<const c10::IntType*>(input->type().get())){
+      constant_value = std::to_string(constant_as<std::int64_t>(input).value());
+    } else if (dynamic_cast<const c10::BoolType*>(input->type().get())){
+      constant_value = std::to_string(constant_as<bool>(input).value());
+    }
 
-    fmt_args.push_back(constant_as<std::string>(input).value());
+    fmt_args.push_back(constant_value);
   }
-  // auto format_result = call_format(fmt_str, fmt_args);
-  auto format_result = fmt_args.at(0) + "." + fmt_args.at(1);
+
+  // Parse the template
+  size_t used_placeholders = 0;
+  std::stringstream final_result;
+  bool in_placeholder = false;
+  for (auto str_it = fmt_str.begin(); str_it != fmt_str.end(); str_it++) {
+    auto c = *str_it;
+    switch (c) {
+      // No need to handle the keyword arguments case as aten::format does not support it
+      case '{':
+        if (in_placeholder) {
+          // Here we hit the "{{" case
+          in_placeholder = false;
+          final_result << c;
+        }
+        else {
+          in_placeholder = true;
+        }
+        break;
+      case '}':
+        if (in_placeholder) {
+          // We can assume the format operation is legally constructed, i.e. correct number of parameters
+          final_result << fmt_args.at(used_placeholders++);
+          in_placeholder = false;
+        }
+        else {
+          final_result << c;
+        }
+        break;
+      default:
+        final_result << c;
+    }
+  }
+
+  auto format_result = final_result.str();
   auto graph = node.owningGraph();
   WithInsertPoint guard(&node);
   node.output()->replaceAllUsesWith(graph->insertConstant(format_result));
 
-
-  // std::vector<at::IValue> iv_inputs;
-  // for (auto input : inputs) {
-  //   iv_inputs.push_back(toIValue(input).value());
-  // }
-
   return true;
-
-  // auto output = node.output();
-  // WithInsertPoint g(&node);
-  // output->replaceAllUsesWith(node.owningGraph()->insertConstant(
-  //     c10::str(iv_inputs).c_str(), output->type()));
-  // return true;
 }
 
 } // namespace

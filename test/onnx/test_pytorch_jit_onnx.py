@@ -211,6 +211,24 @@ class _TestJITIRToONNX:
         a = torch.randn(2, 3)
         self.run_test(graph_ir, (a,))
 
+    def test_dict_with_format_number_use_in_inner_module(self):
+        graph_ir = """
+        graph(%d.1 : Tensor):
+          %7 : str = prim::Constant[value="a"]()
+          %6 : str = prim::Constant[value="res,1"]()
+          %4 : int = prim::Constant[value=1]()
+          %3 : str = prim::Constant[value="res"]()
+          %2 : str = prim::Constant[value="{},{}"]()
+          %key.1 : str = aten::format(%2, %3, %4)
+          %9 : Dict(str, Tensor) = prim::DictConstruct(%7, %d.1)
+          %v.1 : Dict(str, Dict(str, Tensor)) = prim::DictConstruct(%6, %9)
+          %13 : Dict(str, Tensor) = aten::__getitem__(%v.1, %key.1)
+          %x.1 : Tensor = aten::__getitem__(%13, %7)
+          return (%x.1)
+        """
+        a = torch.randn(2, 3)
+        self.run_test(graph_ir, (a,))
+
     def test_dict_with_setitem_use_in_inner_module(self):
         graph_ir = """
         graph(%d.1 : Tensor):
