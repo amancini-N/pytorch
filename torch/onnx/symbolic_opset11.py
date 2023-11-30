@@ -491,23 +491,25 @@ def __getitem_(g: jit_utils.GraphContext, self, i):
     if symbolic_helper._is_tensor_list(self):
         # SequenceAt requires that the input be a List of Tensors
         return g.op("SequenceAt", self, i)
-    elif symbolic_helper._is_tensor_tuple_list(self):
-        n_tensors = int(g.original_node.outputsSize())
-        if n_tensors > 1:
-            indexes = []
-            n_tensors_value = g.op("Constant", value_t=torch.tensor(n_tensors))
-            stride = g.op("Mul", i, n_tensors_value)
-            for j in range(n_tensors):
-                offset = g.op("Constant", value_t=torch.tensor(j))
-                idx = g.op("Add", stride, offset)
-                indexes.append(idx)
-            return tuple(g.op("SequenceAt", self, idx) for idx in indexes)
-
-        return g.op("SequenceAt", self, i)
     else:
-        from torch.onnx.symbolic_opset9 import __getitem_ as getitem
+        tensor_tuple_elements = symbolic_helper._is_tensor_tuple_list(self)
+        if tensor_tuple_elements:
+            n_tensors = tensor_tuple_elements
+            if n_tensors > 1:
+                indexes = []
+                n_tensors_value = g.op("Constant", value_t=torch.tensor(n_tensors))
+                stride = g.op("Mul", i, n_tensors_value)
+                for j in range(n_tensors):
+                    offset = g.op("Constant", value_t=torch.tensor(j))
+                    idx = g.op("Add", stride, offset)
+                    indexes.append(idx)
+                return tuple(g.op("SequenceAt", self, idx) for idx in indexes)
 
-        return getitem(g, self, i)
+            return g.op("SequenceAt", self, i)
+        else:
+            from torch.onnx.symbolic_opset9 import __getitem_ as getitem
+
+            return getitem(g, self, i)
 
 
 @_onnx_symbolic("aten::_set_item")

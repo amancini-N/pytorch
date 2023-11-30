@@ -92,6 +92,7 @@ static void flattenTupleInBlockReturn(Node* n, size_t index) {
   new_construct_node->insertAfter(block_node);
   for (size_t j = 0; j < tt->elements().size(); ++j) {
     auto new_block_out = block_node->insertOutput(index + j + 1);
+    new_block_out->setType(tt->elements().at(j));
     new_construct_node->addInput(new_block_out);
   }
   // Replace the block node with the new TupleConstruct node

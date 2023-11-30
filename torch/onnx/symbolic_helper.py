@@ -525,15 +525,33 @@ def _is_tensor_list(x: _C.Value) -> bool:
 
 
 @_beartype.beartype
-def _is_tensor_tuple_list(x: _C.Value) -> bool:
+def _is_tensor_tuple_list(x: _C.Value) -> Optional[int]:
+    """This works with nested tuple objects and optionals (of tensors)."""
     x_type = _as_list_type(x.type())
     if x_type is None:
-        return False
+        return None
     tuple_type = x_type.getElementType()
     inside_type = _as_tuple_type(tuple_type)
     if inside_type is None:
-        return False
-    return all(isinstance(x, _C.TensorType) for x in inside_type.elements())
+        return None
+    def scan_inside_tuple(t: _C.TupleType) -> Optional[int]:
+        n_elements = 0
+        for elem in t.elements():
+            if isinstance(elem, _C.TensorType):
+                n_elements += 1
+                continue
+            if isinstance(elem, _C.OptionalType) and isinstance(elem.getElementType(), _C.Tensor):
+                n_elements += 1
+                continue
+            if isinstance(elem, _C.TupleType):
+                inside_elements = scan_inside_tuple(elem)
+                if inside_elements:
+                    n_elements += inside_elements
+                    continue
+            return None
+        return n_elements
+
+    return scan_inside_tuple(inside_type)
 
 
 @_beartype.beartype
