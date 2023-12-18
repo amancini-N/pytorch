@@ -1038,6 +1038,7 @@ def _get_example_outputs(model, args):
         input_kwargs = input_args[-1]
         input_args = input_args[:-1]
 
+    torch._C._set_graph_executor_optimize(False)
     example_outputs = model(*input_args, **input_kwargs)
     if isinstance(example_outputs, list):
         example_outputs = [example_outputs]

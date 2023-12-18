@@ -505,9 +505,19 @@ def _as_list_type(jit_type: _C.JitType) -> Optional[_C.ListType]:
     return None
 
 
-def _as_tuple_type(jit_type: _C.JitType) -> Optional[_C.TupleType]:
+def _as_tensor_type(jit_type: _C.JitType) -> Optional[_C.TensorType]:
+    if isinstance(jit_type, _C.TensorType):
+        return jit_type
+    return None
+
+
+def _as_tuple_type(jit_type: _C.JitType, passthrough_optional=False) -> Optional[_C.TupleType]:
     if isinstance(jit_type, _C.TupleType):
         return jit_type
+    if passthrough_optional and isinstance(jit_type, _C.OptionalType):
+        inner_type = jit_type.getElementType()
+        if isinstance(inner_type, _C.TupleType):
+            return inner_type
     return None
 
 
@@ -531,7 +541,7 @@ def _is_tensor_tuple_list(x: _C.Value) -> Optional[int]:
     if x_type is None:
         return None
     tuple_type = x_type.getElementType()
-    inside_type = _as_tuple_type(tuple_type)
+    inside_type = _as_tuple_type(tuple_type, passthrough_optional=True)
     if inside_type is None:
         return None
     def scan_inside_tuple(t: _C.TupleType) -> Optional[int]:
@@ -540,7 +550,7 @@ def _is_tensor_tuple_list(x: _C.Value) -> Optional[int]:
             if isinstance(elem, _C.TensorType):
                 n_elements += 1
                 continue
-            if isinstance(elem, _C.OptionalType) and isinstance(elem.getElementType(), _C.Tensor):
+            if isinstance(elem, _C.OptionalType) and isinstance(elem.getElementType(), _C.TensorType):
                 n_elements += 1
                 continue
             if isinstance(elem, _C.TupleType):

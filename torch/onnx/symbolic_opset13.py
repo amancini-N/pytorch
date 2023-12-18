@@ -472,7 +472,32 @@ def _reduce_with_dtype(onnx_op, name):
                     result = g.op("Cast", result, to_i=dtype_onnx)
             return result
 
-        return reduce_nodim, reduce_dim
+        @symbolic_helper.quantized_args(True)
+        @symbolic_helper.parse_args("v")
+        def reduce_nodim_from_list(g, self):
+            dtype_onnx = None
+            outer_dtype = symbolic_helper._as_list_type(self.type())
+            if outer_dtype is not None:
+                inner_dtype = outer_dtype.getElementType()
+                inner_dtype_as_t = symbolic_helper._as_tensor_type(inner_dtype)
+                if inner_dtype_as_t is not None:
+                    dtype_onnx = _type_utils.JitScalarType.from_dtype(inner_dtype_as_t.dtype()).onnx_type()
+                else:
+                    dtype_onnx = _type_utils.JitScalarType._from_name(str(inner_dtype)).onnx_type()
+                self = g.op("ConcatFromSequence", self, axis_i=0, new_axis_i=1)
+                self = g.op("Cast", self, to_i=dtype_onnx)
+            else:
+                return symbolic_helper._unimplemented(name, "input dtype", self)
+            result = symbolic(g, self)
+            if dtype_onnx is not None:
+                result_dtype_onnx = _type_utils.JitScalarType.from_value(
+                    result
+                ).onnx_type()
+                if result_dtype_onnx != dtype_onnx:
+                    result = g.op("Cast", result, to_i=dtype_onnx)
+            return result
+
+        return reduce_nodim, reduce_dim, reduce_nodim_from_list
 
     return reduce
 
@@ -483,8 +508,9 @@ def _reduce_with_dtype(onnx_op, name):
 @_onnx_symbolic("aten::unflatten")
 @_beartype.beartype
 def unflatten(g: jit_utils.GraphContext, input, dim, unflattened_size):
-    input_dim = symbolic_helper._get_tensor_rank(input)
-    if input_dim is None:
+    input_dim_t = symbolic_helper._get_tensor_rank(input)
+    unflattened_dim_t = symbolic_helper._get_tensor_dim_size(unflattened_size, 0)
+    if input_dim_t is None:
         return symbolic_helper._unimplemented(
             "dim",
             "ONNX and PyTorch use different strategies to split the input. "
@@ -492,7 +518,7 @@ def unflatten(g: jit_utils.GraphContext, input, dim, unflattened_size):
         )
 
     # dim could be negative
-    input_dim = g.op("Constant", value_t=torch.tensor([input_dim], dtype=torch.int64))
+    input_dim = g.op("Constant", value_t=torch.tensor([input_dim_t], dtype=torch.int64))
     dim = g.op("Add", input_dim, dim)
     dim = g.op("Mod", dim, input_dim)
 
@@ -520,6 +546,14 @@ def unflatten(g: jit_utils.GraphContext, input, dim, unflattened_size):
     final_shape = g.op(
         "Concat", head_part_rank, unflattened_size, tail_part_rank, axis_i=0
     )
+
+    # if the size of unflattened_size is known, we can preserve final tensor rank
+    if unflattened_dim_t is not None:
+        final_shape = g.op(
+            "Reshape",
+            final_shape,
+            g.op("Constant", value_t=torch.tensor([input_dim_t + unflattened_dim_t - 1], dtype=torch.int64))
+        )
 
     return symbolic_helper._reshape_helper(g, input, final_shape)
 

@@ -765,6 +765,23 @@ def sign(g: jit_utils.GraphContext, self):
     return g.op("Sign", self)
 
 
+@_onnx_symbolic("prim::isinstance")
+@_beartype.beartype
+def _isinstance(g: jit_utils.GraphContext, self, types):
+    val_type = self.type()
+    resolved_isinstance = False
+    if isinstance(val_type, torch.UnionType):
+        # Either we match all the types in the union, or we cannot predict and fail
+        if all(x in types for x in val_type.containedTypes()):
+            resolved_isinstance = True
+        else:
+            return symbolic_helper._unimplemented(str(g.original_node.kind()), " cannot be simplified ", self)
+    else:
+        resolved_isinstance = val_type in types
+
+    return g.op("Constant", value_t=torch.tensor(resolved_isinstance))
+
+
 @symbolic_helper.quantized_args(True)
 @_beartype.beartype
 def _slice(g: jit_utils.GraphContext, input, axes, starts, ends):
@@ -6873,6 +6890,18 @@ def prim_layout(g: jit_utils.GraphContext, self):
 @_beartype.beartype
 def prim_list_construct(g: jit_utils.GraphContext, *inputs, **kwargs):
     return None
+
+
+# @_onnx_symbolic("prim::DictConstruct")
+# @_beartype.beartype
+# def prim_dict_construct(g: jit_utils.GraphContext, *inputs, **kwargs):
+#     return None
+
+
+# @_onnx_symbolic("aten::keys")
+# @_beartype.beartype
+# def aten_keys(g: jit_utils.GraphContext, *inputs, **kwargs):
+#     return None
 
 
 @_onnx_symbolic("prim::ListUnpack")

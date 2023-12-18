@@ -199,3 +199,55 @@ def stft(
         result = g.op("Div", result, g.op("Constant", value_t=sqrt_nfft))
 
     return result
+
+
+@_onnx_symbolic("aten::pad_sequence")
+@symbolic_helper.parse_args("v", "b", "v")
+@_beartype.beartype
+def pad_sequence(g: jit_utils.GraphContext, self, batch_first, padding_value):
+    assert self.type() == torch.ListType(torch.TensorType.get())
+    # 1st: obtain max sequence length from tensors shapes
+    shapes, (block_ctx,), shape_node = jit_utils.add_op_with_blocks(
+        g, "SequenceMap", self
+    )
+    shapes.setType(torch.ListType(torch.TensorType.get()))
+
+    bl_input = block_ctx.block.addInputToBlock()
+    bl_input.setType(self.type().getElementType())
+    
+    shape_op = block_ctx.op("Shape", bl_input)
+    block_ctx.block.registerOutput(shape_op)
+
+    max_len = g.op(
+        "ReduceMax",
+        g.op("ConcatFromSequence", shapes, axis_i=0, new_axis_i=1),
+        torch.tensor(0),
+        keepdims_i=0,
+    )
+
+    # 2nd: pad tensors in sequence
+
+    padded_seq, (block_ctx,), padded_node = jit_utils.add_op_with_blocks(
+        g, "SequenceMap", self
+    )
+
+    bl_input = block_ctx.block.addInputToBlock()
+    bl_input.setType(self.type().getElementType())
+
+    shape_op = block_ctx.op("Shape", bl_input, end_i=1)
+    to_pad = block_ctx.op("Sub", max_len, shape_op)
+    if padding_value.type().dtype() in [torch.int, torch.int64]:
+        padding_value_key = "constant_value_i"
+    elif padding_value.type().dtype() in [torch.float32, torch.float64]:
+        padding_value_key = "constant_value_f"
+    else:
+        raise RuntimeError # TODO change with symbolic helper
+
+    padding_value_container = {padding_value_key: symbolic_helper._node_get(padding_value.node(), "value").item()}
+    padded_t = block_ctx.op("Pad", bl_input, to_pad, **padding_value_container)
+    block_ctx.block.registerOutput(padded_t)
+
+    padded_seq.setType(torch.ListType(torch.TensorType.get()))
+
+    # 3rd: stack sequences into single tensor
+    return g.op("ConcatFromSequence", padded_seq, axis_i=int(not(batch_first)), new_axis_i=1)

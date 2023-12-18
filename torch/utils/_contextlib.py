@@ -6,7 +6,7 @@ import inspect
 import warnings
 import sys
 from typing import Any, Callable, TypeVar, cast
-
+import torch
 # Used for annotating the decorator usage of _DecoratorContextManager (e.g.,
 # 'no_grad' and 'enable_grad').
 # See https://mypy.readthedocs.io/en/latest/generics.html#declaring-decorators
