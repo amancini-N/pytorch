@@ -4712,7 +4712,11 @@ struct to_ir {
         return graph->insertConstant(false, tree->range());
       } break;
       case TK_NONE: {
-        return graph->insertConstant(IValue(), tree->range());
+        auto constant = graph->insertConstant(IValue(), tree->range());
+        if (type_hint) {
+          constant->setType(type_hint);
+        }
+        return constant;
       } break;
       case TK_IF_EXPR: {
         return emitTernaryIf(TernaryIf(tree), type_hint);

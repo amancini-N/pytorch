@@ -560,6 +560,7 @@ struct TORCH_API TensorCastValue : public SugaredValue {
         /*args=*/args,
         /*kwargs=*/kwargs_,
         /*range=*/loc);
+    casted_val->setType(TensorType::get()->withScalarType(dtype_));
     return std::make_shared<SimpleValue>(casted_val);
   }
 

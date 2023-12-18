@@ -365,6 +365,22 @@ SymBoolTypePtr SymBoolType::get() {
 }
 
 static c10::optional<TypePtr> unifyTypesImpl(const TypePtr& t1, const TypePtr& t2, bool default_to_union=false, const TypePtr& type_hint=nullptr) {
+  // If same type and contained type, and only one includes data type, make sure to return data type
+  if (t1->kind() == t2->kind() && t1->containedTypeSize() == 1) {
+    auto inner_t1 = t1->containedType(0);
+    auto inner_t2 = t2->containedType(0);
+    if (TensorTypePtr tt1 = inner_t1->cast<TensorType>()) {
+      if (TensorTypePtr tt2 = inner_t2->cast<TensorType>()) {
+        if (!tt1->scalarType().has_value()) {
+          return t2;
+        }
+        if (!tt2->scalarType().has_value()) {
+          return t1;
+        }
+      }
+    }
+  }
+
   // check direct subtyping relation
   if (t1->isSubtypeOf(*t2)) {
     return t2;
@@ -879,6 +895,9 @@ bool ListType::isSubtypeOfExt(const Type& rhs_, std::ostream* why_not) const {
   }
   if (rhs_.kind() == AnyListType::Kind) {
     return true;
+  }
+  if (auto list_rhs = rhs_.cast<ListType>()) {
+    return getElementType()->isSubtypeOfExt(*(list_rhs->getElementType()), why_not);
   }
   return false;
 }

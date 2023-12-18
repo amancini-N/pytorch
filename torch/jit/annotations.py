@@ -406,6 +406,8 @@ def try_ann_to_type(ann, loc, rcb=None):
     if ann is None:
         return NoneType.get()
     if inspect.isclass(ann) and is_tensor(ann):
+        if ann.dtype is not None and isinstance(ann.dtype, torch.dtype):
+            return TensorType.get().with_dtype(ann.dtype)
         return TensorType.get()
     if is_tuple(ann):
         # Special case for the empty Tuple type annotation `Tuple[()]`

@@ -77,6 +77,7 @@ def prim_unchecked_cast(g: jit_utils.GraphContext, self):
     # if x is Optional[Tensor], unchecked_cast will cast
     # x to Tensor, so the rest of the graph knows that x is a Tensor.
     if isinstance(self.type(), _C.OptionalType):
-        return g.op("OptionalGetElement", self)
+        containedType = self.type().getElementType()
+        return g.op("OptionalGetElement", self).setType(containedType)
 
     return self
