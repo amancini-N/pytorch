@@ -668,6 +668,31 @@ static void eraseListConstruct(Node* n, int opset_version) {
               : onnx::SequenceEmpty;
           Node* seq_node = block->owningGraph()->create(
               seq_node_kind, {lc_node->inputs()}, 1);
+          if (seq_node_kind == onnx::SequenceEmpty) {
+            // We need to set proper dtype attribute
+            if (TensorTypePtr tt_elem = elem->cast<TensorType>()) {
+              if (tt_elem->scalarType().has_value()) {
+                std::unordered_map<at::ScalarType, int> to_onnx_dtype = {
+                  {at::ScalarType::Byte, 2},
+                  {at::ScalarType::Char, 3},
+                  {at::ScalarType::Short, 5},
+                  {at::ScalarType::Int, 6},
+                  {at::ScalarType::Long, 7},
+                  {at::ScalarType::Half, 10},
+                  {at::ScalarType::Float, 1},
+                  {at::ScalarType::Double, 11},
+                  {at::ScalarType::ComplexFloat, 14},
+                  {at::ScalarType::ComplexDouble, 15},
+                  {at::ScalarType::Bool, 9},
+                  {at::ScalarType::BFloat16, 16},
+                  {at::ScalarType::Float8_e5m2, 17},
+                  {at::ScalarType::Float8_e4m3fn, 18},
+                };
+                int dtype = to_onnx_dtype.find(tt_elem->scalarType().value())->second;
+                seq_node->i_(attr::dtype, dtype);
+              }
+            }  
+          }
           seq_node->copyMetadata(n);
           seq_node->insertBefore(lc_node);
           seq_node->output()->copyMetadata(lc_node->output());

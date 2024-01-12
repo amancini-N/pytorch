@@ -523,7 +523,7 @@ void Graph::lint() const {
   // Graph invariants
 
   // Uncomment the following to see the graph
-  std::cout << *const_cast<Graph*>(this);
+  // std::cout << *const_cast<Graph*>(this);
 
   // nodes
   // - nodes_ is a valid topological ordering for inputs

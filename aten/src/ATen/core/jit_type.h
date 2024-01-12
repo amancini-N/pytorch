@@ -1721,8 +1721,10 @@ TORCH_API std::ostream& operator<<(std::ostream& os, const Stride& s);
 // Be careful with calls because this can be very slow. If calling this
 // on a graph, use `EraseShapeInformation` in shape_analysis.h
 inline TypePtr unshapedType(const TypePtr& type) {
-  if (type->isSubtypeOf(*TensorType::get())) {
-    return TensorType::get();
+  if (TensorTypePtr ttype = type->cast<TensorType>()) {
+    if (type->isSubtypeOf(*TensorType::get())) {
+      return TensorType::get()->withScalarType(ttype->scalarType());
+    }
   }
   at::ArrayRef<TypePtr> contained = type->containedTypes();
   if (contained.empty()) {

@@ -196,7 +196,7 @@ bool IsValidONNXControlflowNode(const Node* n) {
   // and doesn't have subblocks attached yet. Run shape inference for these
   // nodes later, when the subgraph has already completed shape inferencing.
   auto node_kind = n->kind();
-  if (node_kind == ::c10::onnx::Loop || node_kind == ::c10::onnx::If) {
+  if (node_kind == ::c10::onnx::Loop || node_kind == ::c10::onnx::If || node_kind == ::c10::onnx::SequenceMap) {
     if (n->blocks().empty()) {
       return false;
     }
@@ -1832,8 +1832,13 @@ void FetchBlockInputMetadataFromParent(Block* b) {
   auto n = b->owningNode();
   if (nullptr != n && n->kind() == ::c10::onnx::Loop) {
     // Copy node input metadata to subgraph input.
+    // But shape might vary w.r.t. initial value
     for (size_t i = 0; i < n->inputs().size(); ++i) {
-      b->inputs().at(i)->setType(n->inputs().at(i)->type());
+      TypePtr mergedType;
+      bool inferred;
+      std::tie(mergedType, inferred) =
+          MergeInferredType(n->inputs().at(i)->type(), b->inputs().at(i)->type());
+      b->inputs().at(i)->setType(mergedType);
     }
   }
 }
@@ -1992,6 +1997,11 @@ void UpdateReliable(
   // Assume that the tracer can estimate rank correctly,
   // then the output tensor of Shape should always be reliable.
   if (output->node()->kind() == ::c10::onnx::Shape) {
+    reliable = true;
+  }
+  // Reshape should always be reliable if shape is constant
+  if (output->node()->kind() == ::c10::onnx::Reshape && 
+      output->node()->inputs().at(1)->node()->kind() == ::c10::onnx::Constant) {
     reliable = true;
   }
   ConstantValueMap::SetTypeReliable(output->debugName(), reliable);
@@ -2237,6 +2247,7 @@ bool HasSequenceTypeOutput(Node* node) {
       node->kind() == ::c10::onnx::SequenceEmpty ||
       node->kind() == ::c10::onnx::SequenceErase ||
       node->kind() == ::c10::onnx::SequenceConstruct ||
+      node->kind() == ::c10::onnx::SequenceMap ||
       node->kind() == ::c10::onnx::Loop || node->kind() == ::c10::onnx::If)
     return true;
   return false;

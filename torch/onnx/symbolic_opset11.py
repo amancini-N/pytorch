@@ -51,6 +51,7 @@ __all__ = [
     "index_copy",
     "index_put",
     "insert",
+    "_len",
     "linalg_det",
     "linalg_vector_norm",
     "logdet",
@@ -71,6 +72,7 @@ __all__ = [
     "scatter",
     "select",
     "size",
+    "_slice",
     "sort",
     "split_with_sizes",
     "split",
@@ -477,10 +479,10 @@ def masked_scatter(g: jit_utils.GraphContext, self, mask, source):
 @_beartype.beartype
 def _len(g: jit_utils.GraphContext, self):
     if (
-        symbolic_helper._is_tensor_list(self)
+        symbolic_helper._is_tensor_list(self) or symbolic_helper._is_number_list(self)
         or self.node().kind() == "onnx::SplitToSequence"
     ):
-        return g.op("SequenceLength", self)
+        return g.op("SequenceLength", self).setType(torch.TensorType.get().with_dtype(torch.int64).with_sizes([]))
     sz_0 = size(g, self, g.op("Constant", value_t=torch.LongTensor([0])))
     return symbolic_helper._squeeze_helper(g, sz_0, [0])
 
@@ -490,7 +492,7 @@ def _len(g: jit_utils.GraphContext, self):
 def __getitem_(g: jit_utils.GraphContext, self, i):
     if symbolic_helper._is_tensor_list(self):
         # SequenceAt requires that the input be a List of Tensors
-        return g.op("SequenceAt", self, i)
+        return g.op("SequenceAt", self, i).setType(self.type().getElementType())
     else:
         tensor_tuple_elements = symbolic_helper._is_tensor_tuple_list(self)
         if tensor_tuple_elements:
@@ -1663,3 +1665,56 @@ def hstack(g: jit_utils.GraphContext, tensor_list: _C.Value):
 def vstack(g: jit_utils.GraphContext, tensor_list: _C.Value):
     tensor_list = atleast_2d(g, tensor_list)
     return g.op("ConcatFromSequence", tensor_list, axis_i=0, new_axis_i=0)
+
+
+@_onnx_symbolic("aten::slice")
+@_beartype.beartype
+def _slice(g: jit_utils.GraphContext, self, *args):
+    from .symbolic_opset10 import slice as opset10_slice
+    if symbolic_helper._is_number_list(self):
+        jit_type_to_dtype = {
+            _C.IntType: torch.int64,
+            _C.FloatType: torch.float32,
+            _C.BoolType: torch.bool,
+        }
+        list_dtype = jit_type_to_dtype[type(self.type().getElementType())]
+        list_as_tensor = g.op("ConcatFromSequence", self, axis_i=0, new_axis_i=1).setType(_C.TensorType.get().with_dtype(list_dtype).with_sizes([None]))
+        sliced_tensor = opset10_slice(g, list_as_tensor, *args)
+        return g.op("SplitToSequence", sliced_tensor, keepdims_i=0).setType(self.type())
+    elif symbolic_helper._is_tensor_list(self):
+        if len(args) == 4:
+            # aten::slice(Tensor self, int dim, int? start=None, int? end=None, int step=1) -> Tensor
+            dims, start, end, step = args
+        elif len(args) == 3:
+            # aten::slice(t[] l, int? start=None, int? end=None, int step=1) -> t[]
+            start, end, step = args
+            dims = [0]
+        else:
+            raise errors.SymbolicValueError("Unknown aten::slice signature", self)
+        seq_type = _C.ListType(_C.TensorType.get().with_dtype(self.type().getElementType().dtype()))
+        result_sequence = g.op("SequenceEmpty", dtype_i=_type_utils.JitScalarType.from_dtype(self.type().getElementType().dtype()).onnx_type().value)
+        if symbolic_helper._is_none(end):
+            end = g.op("SequenceLength", self)
+        if symbolic_helper._is_none(start):
+            n_iterations = end
+        else:
+            n_iterations = g.op("Sub", end, start)
+        if n_iterations.type().dtype() != torch.int64:
+            n_iterations = g.op("Cast", n_iterations, to_i=_C_onnx.TensorProtoDataType.INT64)
+        final_sequence, (loop_ctx,), _ = jit_utils.add_op_with_blocks(g, "Loop", n_iterations, torch.tensor(True), result_sequence)
+        itr_input = loop_ctx.block.paramNode().addOutput()
+        itr_input.setType(_C.TensorType.get().with_dtype(torch.int64).with_sizes([]))
+        loop_ctx.block.registerOutput(loop_ctx.block.paramNode().addOutput())
+
+        seq_input = loop_ctx.block.paramNode().addOutput().setType(seq_type)
+        if symbolic_helper._is_none(start):
+            itr_index = itr_input
+        else:
+            itr_index = loop_ctx.op("Add", itr_input, start)
+        selected_tensor = loop_ctx.op("SequenceAt", self, itr_index)
+        seq_output = loop_ctx.op("SequenceInsert", seq_input, selected_tensor)
+        loop_ctx.block.registerOutput(seq_output)
+
+        return final_sequence.setType(seq_type)
+
+    return opset10_slice(g, self, *args)

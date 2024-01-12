@@ -205,7 +205,7 @@ def stft(
 @symbolic_helper.parse_args("v", "b", "v")
 @_beartype.beartype
 def pad_sequence(g: jit_utils.GraphContext, self, batch_first, padding_value):
-    assert self.type() == torch.ListType(torch.TensorType.get())
+    assert self.type().isSubtypeOf(torch.ListType(torch.TensorType.get()))
     # 1st: obtain max sequence length from tensors shapes
     shapes, (block_ctx,), shape_node = jit_utils.add_op_with_blocks(
         g, "SequenceMap", self
@@ -221,11 +221,13 @@ def pad_sequence(g: jit_utils.GraphContext, self, batch_first, padding_value):
     max_len = g.op(
         "ReduceMax",
         g.op("ConcatFromSequence", shapes, axis_i=0, new_axis_i=1),
-        torch.tensor(0),
+        axes_i=[0],
         keepdims_i=0,
     )
 
     # 2nd: pad tensors in sequence
+
+    _1d_zero = g.op("Constant", value_t=torch.tensor([0], dtype=torch.int64))
 
     padded_seq, (block_ctx,), padded_node = jit_utils.add_op_with_blocks(
         g, "SequenceMap", self
@@ -236,15 +238,17 @@ def pad_sequence(g: jit_utils.GraphContext, self, batch_first, padding_value):
 
     shape_op = block_ctx.op("Shape", bl_input, end_i=1)
     to_pad = block_ctx.op("Sub", max_len, shape_op)
-    if padding_value.type().dtype() in [torch.int, torch.int64]:
-        padding_value_key = "constant_value_i"
-    elif padding_value.type().dtype() in [torch.float32, torch.float64]:
-        padding_value_key = "constant_value_f"
-    else:
-        raise RuntimeError # TODO change with symbolic helper
+    # We only pad to right
+    to_pad = block_ctx.op(
+        "Concat",
+        _1d_zero,
+        to_pad,
+        axis_i=0,
+    )
 
-    padding_value_container = {padding_value_key: symbolic_helper._node_get(padding_value.node(), "value").item()}
-    padded_t = block_ctx.op("Pad", bl_input, to_pad, **padding_value_container)
+    if padding_value.type().dtype() != bl_input.type().dtype():
+        padding_value = padding_value = block_ctx.op("Cast", padding_value, to_i=_type_utils.JitScalarType.from_dtype(bl_input.type().dtype()).onnx_type())
+    padded_t = block_ctx.op("Pad", bl_input, to_pad, padding_value)
     block_ctx.block.registerOutput(padded_t)
 
     padded_seq.setType(torch.ListType(torch.TensorType.get()))

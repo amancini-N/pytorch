@@ -1188,3 +1188,44 @@ def quantized_conv_transpose3d(
     )
 
     return symbolic_helper.quantize_helper(g, output, op_scale, op_zero_point)
+
+@_onnx_symbolic("aten::isin")
+@_beartype.beartype
+@symbolic_helper.parse_args("v", "v", "b", "b")
+def isin(g: jit_utils.GraphContext, elements, test_elements, assume_unique=False, invert=False):
+    minus1d = g.op("Constant", value_t=torch.tensor([-1], dtype=torch.int64))
+    flat_test_elements = symbolic_helper._reshape_helper(g, test_elements, minus1d)
+    elements_shape = g.op("Shape", elements)
+    ones_like_elem_shape = g.op(
+        "ConstantOfShape",
+        g.op("Shape", elements_shape),
+        value_t=torch.tensor([1], dtype=torch.int64)
+    )
+
+    expanded_elements_shape = g.op(
+        "Concat",
+        elements_shape,
+        g.op("Constant", value_t=torch.tensor([1], dtype=torch.int64)),
+        axis_i=0,
+    )
+    expanded_test_elements_shape = g.op(
+        "Concat",
+        ones_like_elem_shape,
+        g.op("Shape", flat_test_elements),
+        axis_i=0,
+    )
+
+    expanded_elements = symbolic_helper._reshape_helper(g, elements, expanded_elements_shape)
+    expanded_test_elements = symbolic_helper._reshape_helper(g, flat_test_elements, expanded_test_elements_shape)
+
+    matching_expanded_elements = g.op("Equal", expanded_elements, expanded_test_elements)
+    matching_elements = g.op(
+        "ReduceMax",
+        g.op("Cast", matching_expanded_elements, to_i=_C_onnx.TensorProtoDataType.INT8),
+        axes_i=[-1],
+        keepdims_i=0,
+    )
+    matching_elements = g.op("Cast", matching_elements, to_i=_C_onnx.TensorProtoDataType.BOOL)
+    if invert:
+        matching_elements = g.op("Not", matching_elements)
+    return matching_elements

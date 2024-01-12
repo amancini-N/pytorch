@@ -527,6 +527,11 @@ def _is_list(x: _C.Value) -> bool:
 
 
 @_beartype.beartype
+def _is_number_list(x: _C.Value) -> bool:
+    return x.type().isSubtypeOf(_C.ListType(_C.NumberType.get()))
+
+
+@_beartype.beartype
 def _is_tensor_list(x: _C.Value) -> bool:
     x_type = _as_list_type(x.type())
     if x_type is None:
@@ -1444,6 +1449,28 @@ def _index_fill_reshape_helper(g: jit_utils.GraphContext, self, dim, index):
     return expanded_index_shape, expanded_index
 
 
+@_beartype.beartype
+def _concat_from_list_helper(g: jit_utils.GraphContext, values):
+    if _is_list(values):
+        converted_dtype = None
+        list_type = values.type().getElementType()
+        if isinstance(list_type, torch.IntType):
+            converted_dtype = torch.int64
+            onnx_dtype = _C_onnx.TensorProtoDataType.INT64
+        elif isinstance(list_type, torch.BoolType):
+            converted_dtype = torch.bool
+            onnx_dtype = _C_onnx.TensorProtoDataType.BOOL
+        elif isinstance(list_type, torch.FloatType):
+            converted_dtype = torch.float32
+            onnx_dtype = _C_onnx.TensorProtoDataType.FLOAT
+        if converted_dtype is not None:
+            values_ = _unpack_list(values)
+            scalar_expanded_shape = g.op("Constant", value_t=torch.tensor([1], dtype=torch.int64))
+            values_ = [g.op("Reshape", g.op("Cast", s, to_i=onnx_dtype), scalar_expanded_shape) for s in values_]
+            values = g.op("Concat", *values_, axis_i=torch.tensor(0)).setType(torch.TensorType.get().with_dtype(torch.int64).with_sizes([len(values_)]))
+            return values
+
+
 # By default, when any value in the 'shape' input is equal to zero
 # the corresponding dimension value is copied from the input tensor dynamically.
 # allowzero=1 indicates that if any value in the 'shape' input is set to zero,
@@ -1452,16 +1479,23 @@ def _index_fill_reshape_helper(g: jit_utils.GraphContext, self, dim, index):
 @_beartype.beartype
 def _reshape_helper(g: jit_utils.GraphContext, input, shape, allowzero=0):
     shape = _maybe_get_const(shape, "is")
+    sizes = None
     if not _is_value(shape):
+        sizes = [None if x == -1 else x for x in shape]
         shape = g.op("Constant", value_t=torch.LongTensor(shape))
+    elif _is_list(shape) and isinstance(shape.type().getElementType(), torch.IntType):
+        shape = _concat_from_list_helper(g, shape)
     if g.opset <= 13:
         if allowzero == 1:
             _onnx_opset_unsupported(
                 "Reshape with allowzero=1", GLOBALS.export_onnx_opset_version, 14, input
             )
-        return g.op("Reshape", input, shape)
+        op = g.op("Reshape", input, shape)
     else:
-        return g.op("Reshape", input, shape, allowzero_i=allowzero)
+        op = g.op("Reshape", input, shape, allowzero_i=allowzero)
+    if sizes is not None:
+        op = op.setType(op.type().with_sizes(sizes))
+    return op
 
 
 @_beartype.beartype

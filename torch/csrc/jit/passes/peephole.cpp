@@ -11,6 +11,7 @@
 #include <torch/csrc/jit/passes/peephole_dict_idioms.h>
 #include <torch/csrc/jit/passes/peephole_list_idioms.h>
 #include <torch/csrc/jit/passes/peephole_non_tensor.h>
+#include <torch/csrc/jit/passes/peephole_control_flow_idioms.h>
 #include <torch/csrc/jit/runtime/graph_executor.h>
 
 namespace torch {
@@ -36,6 +37,7 @@ struct PeepholeOptimizeImpl {
     changed |= PeepholeOptimizeDictIdioms(graph_);
     changed |= PeepholeOptimizeAliasSensitive(graph_, shape_peepholes_);
     changed |= PeepholeOptimizeNonTensor(graph_);
+    changed |= PeepholeOptimizeControlFlowIdioms(graph_);
     changed |= CombineConcats(graph_);
     return changed;
   }

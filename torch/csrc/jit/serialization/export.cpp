@@ -1002,7 +1002,7 @@ void GraphEncoder::EncodeNode(
     AddAttribute(
         node_proto, node, attr_name, use_external_data_format, onnx_file_path);
   }
-  if (node->kind() == ::c10::onnx::Loop) {
+  if (node->kind() == ::c10::onnx::Loop || node->kind() == ::c10::onnx::SequenceMap) {
     TORCH_INTERNAL_ASSERT(node->blocks().size() == 1);
 
     auto body = node_proto->add_attribute();

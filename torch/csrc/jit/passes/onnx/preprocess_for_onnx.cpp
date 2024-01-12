@@ -208,6 +208,7 @@ static void fuseListAndListUnpack(Block* b) {
               attr::value, at::scalar_to_tensor(at::Scalar(int(i))));
           Node* gather_node = b->owningGraph()->create(onnx::Gather, 1);
           gather_node->insertBefore(*it);
+          gather_node->output()->setType(TensorType::get()->withScalarType(at::ScalarType::Long)->withDim(0));
           gather_node->addInput(it->input());
           gather_node->addInput(gather_indices->output());
           gather_node->copyMetadata(*it);

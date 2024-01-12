@@ -330,8 +330,21 @@ void NodeToONNX(
           // An update in ConstantValueMap is also needed here, since
           // the user setType can be only accessed in this step, and it
           // should be reliable.
-          MergeInferredTypeAndSetMap(
+
+          // NOTE: Why the hell we should re-adopt primitive types from original outputs here??
+          // Overriding in case
+          auto old_type_as_list = old->type()->cast<ListType>();
+          bool do_merge = true;
+          if (old_type_as_list) {
+            auto old_list_element_type_as_number = old_type_as_list->getElementType()->cast<IntType>();
+            if (old_list_element_type_as_number) {
+              do_merge = false;
+            }
+          }
+          if (do_merge) {
+            MergeInferredTypeAndSetMap(
               outputs[i], old->type(), outputs[i]->type());
+          }
           // non ONNX node with no type given will throw out the warnings here.
           UpdateReliable(
               outputs[i],
@@ -557,6 +570,7 @@ void NodeToONNX(
       // Python. Check #87343 for details.
       py::object raw_output = onnx.attr("_run_symbolic_method")(
           new_block->owningGraph()->shared_from_this(),
+          new_block,
           op->name(),
           pyobj.attr("symbolic"),
           py_symbolic_args);

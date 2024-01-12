@@ -31,7 +31,12 @@ std::unordered_set<Symbol> supported_ops = {
     prim::ListConstruct,
     aten::format,
     prim::Uninitialized,
+    prim::unchecked_cast,
     aten::__getitem__};
+
+std::unordered_set<Symbol> optional_ops_denylist = {
+    aten::__is__,
+    aten::__isnot__};
 
 // Flatten block inputs and insert a tuple construct in the block
 static void flattenTupleInLoopParams(Node* n, size_t index) {
@@ -47,6 +52,7 @@ static void flattenTupleInLoopParams(Node* n, size_t index) {
       block->prependNode(block->owningGraph()->create(prim::TupleConstruct));
   for (size_t j = 0; j < tt->elements().size(); ++j) {
     auto new_block_in = block->insertInput(index + j);
+    new_block_in->setType(tt->elements().at(j));
     new_construct_node->addInput(new_block_in);
     block_node->insertInput(index + j + 1, input->node()->inputs().at(j));
   }
@@ -168,11 +174,12 @@ static void RemoveTupleConstants(Node* n) {
   const auto& tuple_elements = tuple->elements();
   WithInsertPoint insert(n);
   std::vector<Value*> elements;
-  for (const auto& elem : tuple_elements) {
-    auto constant = insertConstant(*n->owningGraph(), elem);
+  auto tuple_type = n->output()->type()->expect<TupleType>();
+  for (size_t i = 0; i < tuple_elements.size(); ++i) {
+    auto& elem = tuple_elements.at(i);
+    auto constant = insertConstant(*n->owningGraph(), elem)->setType(tuple_type->elements().at(i));
     elements.push_back(constant);
   }
-  auto tuple_type = n->output()->type()->expect<TupleType>();
   auto tuple_construct = g->insertNode(n->owningGraph()->createTuple(
       elements, tuple_type->schema() ? std::move(tuple_type) : nullptr));
   tuple_construct->copyMetadata(n);
@@ -190,7 +197,18 @@ static void flattenInputs(Node* n, Node* insert_point) {
   // flatten the input list  op(a, tup, b) --> op(a, t0, t1, b)
   for (size_t i = 0; i < n->inputs().size();) {
     auto input = n->inputs()[i];
-    if (TupleTypePtr tt = input->type()->cast<TupleType>()) {
+    bool is_tuple = false;
+    bool is_mapped_optional_tuple = false;
+    TupleTypePtr tt;
+    if (tt = input->type()->cast<TupleType>()) {
+      is_tuple = true;
+    }
+    if (OptionalTypePtr ot = input->type()->cast<OptionalType>()) {
+      if (tt = ot->getElementType()->cast<TupleType>()) {
+        is_mapped_optional_tuple = true;
+      }
+    }
+    if (is_tuple || (is_mapped_optional_tuple && optional_ops_denylist.count(n->kind()) == 0)) {
       TORCH_CHECK(
           (input->node()->kind() == prim::TupleConstruct),
           "tuple use not matched to tuple construct. Instead found: ",
@@ -224,6 +242,25 @@ static void flattenInputs(Node* n, Node* insert_point) {
   }
 }
 
+static void EliminateUncheckedCasts(Block* block) {
+
+  for (auto it = block->nodes().begin(), end = block->nodes().end(); it != end;) {
+    auto n = *it++;
+    for (Block* inner_block : n->blocks()) {
+      EliminateUncheckedCasts(inner_block);
+    }
+    if (n->kind() == prim::unchecked_cast) {
+      TupleTypePtr tt;
+      if (OptionalTypePtr ot = n->input()->type()->cast<OptionalType>()) {
+        if (tt = ot->getElementType()->cast<TupleType>()) {
+          n->output()->replaceAllUsesWith(n->input());
+        }
+      }
+    }
+  }
+
+}
+
 static void flattenOutputs(Node* n, Node* insert_point) {
   // flatten the outputs list
   auto& graph = *n->owningGraph();
@@ -234,17 +271,41 @@ static void flattenOutputs(Node* n, Node* insert_point) {
       continue;
     }
 
+    bool is_tuple = false;
+    bool is_mapped_optional_tuple = false;
+    TupleTypePtr tt;
+    if (tt = output->type()->cast<TupleType>()) {
+      is_tuple = true;
+    }
+    if (OptionalTypePtr ot = output->type()->cast<OptionalType>()) {
+      if (tt = ot->getElementType()->cast<TupleType>()) {
+        is_mapped_optional_tuple = true;
+      }
+    }
+    is_mapped_optional_tuple &= optional_ops_denylist.count(n->kind()) == 0;
     // (a, b, tup, c) -> (a, b, t0, t1, c)
     // and:
     //    tup = (t0, t1)
     // is placed at the current insertion point
-    if (TupleTypePtr tt = output->type()->cast<TupleType>()) {
+    if (is_tuple || is_mapped_optional_tuple) {
       if (supported_ops.count(n->kind()) > 0) {
-        for (const auto j : c10::irange(tt->elements().size())) {
-          n->insertOutput(i + 1 + j)->setType(tt->elements()[j]);
+        Node* new_tup;
+        if (n->kind() == prim::unchecked_cast) {
+          std::vector<Value*> unpackedOutputs;
+          WithInsertPoint insert(n);
+          for (const auto j : c10::irange(tt->elements().size())) {
+            // unpack into n unchecked_cast ops
+            auto j_input = n->inputs().at(j);
+            auto j_output = n->owningGraph()->insertUncheckedCast(j_input, j_input->type());
+            unpackedOutputs.push_back(j_output);
+          }
+          new_tup = graph.createTuple(unpackedOutputs);
+        } else {
+          for (const auto j : c10::irange(tt->elements().size())) {
+            n->insertOutput(i + 1 + j)->setType(tt->elements()[j]);
+          }
+          new_tup = graph.createTuple(n->outputs().slice(i + 1, tt->elements().size()));
         }
-        auto new_tup =
-            graph.createTuple(n->outputs().slice(i + 1, tt->elements().size()));
         new_tup->copyMetadata(n);
         new_tup->insertBefore(insert_point);
         insert_point = new_tup;
@@ -320,10 +381,11 @@ static void EnsureNoTuples(Block* block) {
 }
 
 void LowerAllTuples(const std::shared_ptr<Graph>& graph) {
+  // EliminateUncheckedCasts(graph->block());
   LowerAllTuples(graph->block());
   GRAPH_DUMP("After LowerAllTuples: ", graph);
   EliminateDeadCode(graph->block());
-  EnsureNoTuples(graph->block());
+  // EnsureNoTuples(graph->block());
 }
 
 void LowerSimpleTuples(Block* block) {

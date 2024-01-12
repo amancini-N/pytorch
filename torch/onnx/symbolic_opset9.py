@@ -947,7 +947,7 @@ def _standard_gamma(g: jit_utils.GraphContext, self, generator):
 @_beartype.beartype
 def t(g: jit_utils.GraphContext, self):
     rank = symbolic_helper._get_tensor_rank(self)
-    if rank is None or rank < 2:
+    if rank is not None and rank < 2:
         # The transpose of a 1d or 0d tensor is itself. ONNX does not define the behavior
         # clearly and onnxruntime fails on these cases. So we add an Identity node to
         # mirror the behavior of eager mode.
@@ -970,20 +970,29 @@ def numpy_T(g: jit_utils.GraphContext, input):
 @_beartype.beartype
 def expand(g: jit_utils.GraphContext, self, size, implicit):
     size = symbolic_helper._maybe_get_const(size, "is")
+    original_sizes = None
     if not symbolic_helper._is_value(size):
         size = g.op("Constant", value_t=torch.LongTensor(size))
     elif symbolic_helper._is_packed_list(size):
         # Expand with -1 dim value means dim is unchanged.
         # Since onnx::expand supports two-way broadcasting,
         # -1 dim value can be exported to onnx as 1
+        original_sizes = list(size.node().inputs())
         size = symbolic_helper._reshape_helper(
             g, stack(g, size, 0), g.op("Constant", value_t=torch.tensor([-1]))
         )
     dtype = _type_utils.JitScalarType.INT64
     ones = ones_like(g, size, dtype)
     neg_ones = mul(g, ones, g.op("Constant", value_t=torch.tensor(-1)))
-    size = where(g, g.op("Equal", size, neg_ones), ones, size)
-    return g.op("Expand", self, size)
+    neg_mask = g.op("Equal", size, neg_ones)
+    size = where(g, neg_mask, ones, size)
+    expand_node = g.op("Expand", self, size)
+    if self.type().dim() is None and original_sizes is not None:
+        expand_node.setType(
+            expand_node.type().with_sizes([None] * len(original_sizes))
+        )
+
+    return expand_node
 
 
 @_onnx_symbolic("aten::broadcast_to")
@@ -3864,6 +3873,8 @@ def zeros(g: jit_utils.GraphContext, sizes, dtype, layout, device, pin_memory=Fa
     sizes_ = symbolic_helper._maybe_get_const(sizes, "is")
     if isinstance(sizes_, list) and len(sizes_) == 0:
         sizes = g.op("Constant", value_t=torch.tensor([]).to(torch.int64))
+    elif symbolic_helper._is_list(sizes) and isinstance(sizes.type().getElementType(), torch.IntType):
+        sizes = symbolic_helper._concat_from_list_helper(g, sizes)
     return g.op(
         "ConstantOfShape",
         sizes,
@@ -6712,20 +6723,29 @@ def index_add(g: jit_utils.GraphContext, self, dim, index, other, alpha=None):
 
 
 @_onnx_symbolic("aten::roll")
-@symbolic_helper.parse_args("v", "is", "is")
+@symbolic_helper.parse_args("v", "v", "is")
 @_beartype.beartype
 def roll(g: jit_utils.GraphContext, self, shifts, dims):
+    shifts = symbolic_helper._unpack_list(shifts)
     assert len(shifts) == len(dims)
 
     result = self
     for i in range(len(shifts)):
         shapes = []
+        if symbolic_helper._is_constant(shifts[i]):
+            neg_shift_i = [-shifts[i]]
+        else:
+            neg_shift_i = symbolic_helper._reshape_helper(
+                g,
+                g.op("Neg", shifts[i]),
+                g.op("Constant", value_t=torch.tensor([1], dtype=torch.int64)),
+            )
         shape = symbolic_helper._slice_helper(
-            g, result, axes=[dims[i]], starts=[-shifts[i]], ends=[sys.maxsize]
+            g, result, axes=[dims[i]], starts=neg_shift_i, ends=[sys.maxsize]
         )
         shapes.append(shape)
         shape = symbolic_helper._slice_helper(
-            g, result, axes=[dims[i]], starts=[0], ends=[-shifts[i]]
+            g, result, axes=[dims[i]], starts=[0], ends=neg_shift_i
         )
         shapes.append(shape)
         result = g.op("Concat", *shapes, axis_i=dims[i])
@@ -7127,6 +7147,19 @@ def prim_constant(g: jit_utils.GraphContext, *inputs, **attrs):
     node = g.original_node
 
     if node.mustBeNone():
+        node_type = node.output().type()
+        if isinstance(node_type, _C.OptionalType):
+            c_dtype = None
+            if isinstance(node_type.getElementType(), _C.TensorType):
+                if node_type.getElementType().dtype():
+                    c_dtype = node_type.getElementType().dtype()
+            if c_dtype is None:
+                warnings.warn("Cannot identify dtype for empty Optional init")
+                return g.op("Optional")
+
+            c_node = g.op("Optional", type_ty=_C.TensorType.get().with_dtype(c_dtype))
+            c_node.setType(_C.OptionalType(_C.TensorType.get().with_dtype(c_dtype)))
+            return c_node
         return None
     # This must go before checking for string values, because some device constants
     # have string values, but we want to keep them as unconverted Device types so

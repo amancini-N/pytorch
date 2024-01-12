@@ -266,6 +266,16 @@ void FixupONNXLoopBlockInputs(Node* n) {
           input_i->setType(OptionalType::create(merged_type));
         }
       }
+      else {
+        TypePtr merged_type;
+        bool inferred = false;
+        std::tie(merged_type, inferred) = MergeInferredType(
+            input_i->type(),
+            block->outputs().at(i)->type());
+        if (inferred) {
+          input_i->setType(merged_type);
+        }
+      }
     }
   }
 }
@@ -498,6 +508,8 @@ void ONNXFixupUninitializedOutput(Node* node, int opset_version) {
         !(IsUninitializedNode(then_block_output->node()) &&
           IsUninitializedNode(else_block_output->node())),
         "Cannot infer shape and type for ONNX If with uninitialized output in both subblocks. Please check the model graph.");
+
+    // Does not work, found issue with batch_idxs at sequence_generator.py on break of num_remaining_sent == 0 condition
 
     if (IsUninitializedNode(then_block_output->node())) {
       InferShapeTypeForUninitializedOutput(

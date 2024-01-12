@@ -1760,7 +1760,7 @@ def _set_input_and_output_names(graph, input_names, output_names):
 
 
 @_beartype.beartype
-def _run_symbolic_method(g, op_name, symbolic_fn, args):
+def _run_symbolic_method(g, block, op_name, symbolic_fn, args):
     r"""
     This trampoline function gets invoked for every symbolic method
     call from C++.
@@ -1768,7 +1768,7 @@ def _run_symbolic_method(g, op_name, symbolic_fn, args):
     try:
         graph_context = jit_utils.GraphContext(
             graph=g,
-            block=g.block(),
+            block=block,
             opset=GLOBALS.export_onnx_opset_version,
             original_node=None,  # type: ignore[arg-type]
             params_dict=_params_dict,

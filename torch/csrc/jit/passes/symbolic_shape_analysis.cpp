@@ -15,6 +15,7 @@
 #include <torch/csrc/jit/passes/lower_tuples.h>
 #include <torch/csrc/jit/passes/peephole.h>
 #include <torch/csrc/jit/passes/peephole_list_idioms.h>
+#include <torch/csrc/jit/passes/peephole_control_flow_idioms.h>
 #include <torch/csrc/jit/passes/peephole_non_tensor.h>
 #include <torch/csrc/jit/passes/remove_mutation.h>
 #include <torch/csrc/jit/passes/shape_analysis.h>
@@ -226,6 +227,7 @@ bool shapeGraphCleanupPasses(std::shared_ptr<Graph> graph) {
   made_change |= ConstantPropagation(graph);
   made_change |= PeepholeOptimizeNonTensor(graph);
   made_change |= PeepholeOptimizeListIdioms(graph, /*refine_list_len*/ true);
+  // made_change |= PeepholeOptimizeControlFlowIdioms(graph);
   made_change |= RefineIntegerValues(graph);
   made_change |= ConstantPropagation(graph);
   // todo add return change for constant pooling

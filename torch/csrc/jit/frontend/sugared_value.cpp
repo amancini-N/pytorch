@@ -42,7 +42,8 @@ builtin_cast_method_to_scalar_type() {
       {"int", at::kInt},
       {"long", at::kLong},
       {"short", at::kShort},
-      {"half", at::kHalf}};
+      {"half", at::kHalf},
+      {"bool", at::kBool}};
   return mapping;
 }
 

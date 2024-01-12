@@ -278,6 +278,7 @@ namespace c10 {
   _(onnx, SequenceEmpty)             \
   _(onnx, SequenceInsert)            \
   _(onnx, SequenceErase)             \
+  _(onnx, SequenceMap)               \
   _(onnx, ConcatFromSequence)        \
   _(onnx, Identity)                  \
   _(onnx, SoftmaxCrossEntropyLoss)   \

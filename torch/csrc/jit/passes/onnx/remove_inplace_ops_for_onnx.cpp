@@ -37,11 +37,17 @@ struct InplaceConverter {
   void gatherAttrNameInitialValueMap(
       Block* block,
       std::unordered_map<std::string, Value*>& attr_name_value_map,
-      std::unordered_map<Node*, std::string>& attr_node_fullname_map);
+      std::unordered_map<Node*, std::string>& attr_node_fullname_map,
+      std::unordered_map<Value*, std::unordered_map<std::string, Value*>>& attr_values_by_objects_map);
+  void gatherAttrValuesFromImmutableObjects(
+      Block* block,
+      std::unordered_map<Value*, std::unordered_map<std::string, Value*>>& attr_values_by_objects_map
+  );
   void replaceAttrWithInplaceOps(
       Block* block,
       const std::unordered_map<std::string, Value*>& attr_name_value_map,
-      const std::unordered_map<Node*, std::string>& attr_node_fullname_map);
+      const std::unordered_map<Node*, std::string>& attr_node_fullname_map,
+      const std::unordered_map<Value*, std::unordered_map<std::string, Value*>>& attr_values_by_objects_map);
 
   void convertInplaceOpsAndTrackAlias();
   void convertInplaceOpsAndTrackAlias(Block* block);
@@ -636,14 +642,15 @@ Value* InplaceConverter::ValueTracker::findAliasForValueAtNode(
 void InplaceConverter::gatherAttrNameInitialValueMap(
     Block* block,
     std::unordered_map<std::string, Value*>& attr_name_value_map,
-    std::unordered_map<Node*, std::string>& attr_node_fullname_map) {
+    std::unordered_map<Node*, std::string>& attr_node_fullname_map,
+    std::unordered_map<Value*, std::unordered_map<std::string, Value*>>& attr_values_by_objects) {
   for (auto it = block->nodes().begin(); it != block->nodes().end();) {
     Node* n = *it;
     it++; // node n can be destroyed
 
     for (auto* sub_block : n->blocks()) {
       gatherAttrNameInitialValueMap(
-          sub_block, attr_name_value_map, attr_node_fullname_map);
+          sub_block, attr_name_value_map, attr_node_fullname_map, attr_values_by_objects);
     }
 
     if (n->kind() != prim::GetAttr && n->kind() != prim::SetAttr)
@@ -693,6 +700,9 @@ void InplaceConverter::gatherAttrNameInitialValueMap(
             name,
             " is not materializable.");
       }
+    } else if (attr_name_value_map.find(fullName) == attr_name_value_map.end()) {
+      auto creation_val = n->inputs().at(0);
+      attr_values_by_objects.insert({creation_val, std::unordered_map<std::string, Value*>()});
     }
 
     // Create dummy initial value, if initial value does not exist for this
@@ -705,6 +715,37 @@ void InplaceConverter::gatherAttrNameInitialValueMap(
     }
   }
 }
+
+void InplaceConverter::gatherAttrValuesFromImmutableObjects(
+    Block* block,
+    std::unordered_map<Value*, std::unordered_map<std::string, Value*>>& attr_values_by_objects) {
+
+  for (auto it = block->nodes().begin(); it != block->nodes().end();) {
+    Node* n = *it++;
+
+    if (n->kind() == prim::SetAttr) {
+      // By topological order, we guarantee object map is ready
+      auto obj = n->inputs().at(0);
+      auto obj_map = attr_values_by_objects.find(obj);
+      if (obj_map != attr_values_by_objects.end()) {
+        auto name = n->s(attr::name);
+        auto value = n->inputs().at(1);
+        if (obj_map->second.find(name) == obj_map->second.end()) {
+          obj_map->second.insert({name, value});
+        }
+      }
+    }
+  }
+
+  for (auto it = block->nodes().begin(); it != block->nodes().end();) {
+    Node* n = *it++;
+    for (auto* sub_block : n->blocks()) {
+        gatherAttrValuesFromImmutableObjects(
+            sub_block, attr_values_by_objects);
+      }
+  }
+}
+
 
 // Replace prim::GetAttr and prim::SetAttr with ATen inplace operators.
 // Example graph:
@@ -763,7 +804,8 @@ void InplaceConverter::gatherAttrNameInitialValueMap(
 void InplaceConverter::replaceAttrWithInplaceOps(
     Block* block,
     const std::unordered_map<std::string, Value*>& attr_name_value_map,
-    const std::unordered_map<Node*, std::string>& attr_node_fullname_map) {
+    const std::unordered_map<Node*, std::string>& attr_node_fullname_map,
+    const std::unordered_map<Value*, std::unordered_map<std::string, Value*>>& attr_values_by_objects_map) {
   for (const auto& pair : attr_node_fullname_map) {
     auto* n = pair.first;
     auto fullName = pair.second;
@@ -772,6 +814,22 @@ void InplaceConverter::replaceAttrWithInplaceOps(
 
     TORCH_INTERNAL_ASSERT(
         n->kind() == prim::GetAttr || n->kind() == prim::SetAttr);
+
+    if (find_init_val->second->type()->cast<NoneType>()) {
+      // FIXME: check for recovering objects not belonging to model structure, might be better?
+      auto found_obj_values = attr_values_by_objects_map.find(n->inputs().at(0));
+      if (found_obj_values != attr_values_by_objects_map.end()) {
+        auto name = n->s(attr::name);
+        if (n->kind() == prim::GetAttr) {
+          auto found_name_value = found_obj_values->second.find(name);
+          n->output()->replaceAllUsesWith(found_name_value->second);
+          n->destroy();
+          continue;
+        }
+
+      }
+    }
+    
     if (n->kind() == prim::SetAttr) {
       // Convert SetAttr to inplace op aten::set_.
       WithInsertPoint guard(n);
@@ -794,20 +852,23 @@ void InplaceConverter::replaceAttrWithInplaceOps(
 void InplaceConverter::convertGetSetAttrToInplaceOps(Block* block) {
   std::unordered_map<std::string, Value*> attr_name_value_map = {};
   std::unordered_map<Node*, std::string> attr_node_fullname_map = {};
+  std::unordered_map<Value*, std::unordered_map<std::string, Value*>> attr_values_by_objects_map = {};
   // First pass over graph, to gather all attribute names, and their initial
   // values. Create dummy initial values for attributes if necessary. By the end
   // of this pass, these dummy initial values should have zero uses, and can be
   // safely removed. Otherwise it will imply an error in the model for using
   // uninitialized values.
   gatherAttrNameInitialValueMap(
-      block, attr_name_value_map, attr_node_fullname_map);
+      block, attr_name_value_map, attr_node_fullname_map, attr_values_by_objects_map);
+  gatherAttrValuesFromImmutableObjects(
+      block, attr_values_by_objects_map);
   GRAPH_UPDATE("Graph after gatherAttrNameInitialValueMap", graph_->toString());
 
   // Second pass over graph,
   // replace GetAttr with first seen alias (usually initial value),
   // and replace SetAttr with inplace op, updating new value onto first seen
   // alias.
-  replaceAttrWithInplaceOps(block, attr_name_value_map, attr_node_fullname_map);
+  replaceAttrWithInplaceOps(block, attr_name_value_map, attr_node_fullname_map, attr_values_by_objects_map);
 }
 
 // Convert inplace ops to outplace version, and record the associated new alias

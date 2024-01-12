@@ -254,19 +254,29 @@ struct PeepholeOptimizeNonTensorImpl {
         // replace the output with true if node is __isnot__ or false if node is
         // __is__
         AT_ASSERT(node->inputs().size() == 2);
-        for (size_t check_none_index : {0, 1}) {
-          bool input_must_be_none =
-              node->inputs().at(check_none_index)->mustBeNone();
-          bool other_must_not_be_none =
-              node->inputs().at(1 - check_none_index)->mustNotBeNone();
-          if (input_must_be_none && other_must_not_be_none) {
-            WithInsertPoint guard(node);
-            auto output = node->owningGraph()->insertConstant(
-                node->kind() == aten::__isnot__);
-            GRAPH_UPDATE(
-                "Folding ", getHeader(node), " to ", output->debugName());
-            node->output()->replaceAllUsesWith(output);
-            changed = true;
+        // Naive case: if the 2 inputs are the exact same one, fold on true for __is__, on false for __isnot__
+        if (node->inputs().at(0) == node->inputs().at(1)) {
+          WithInsertPoint guard(node);
+          auto output = node->owningGraph()->insertConstant(node->kind() == aten::__is__);
+          GRAPH_UPDATE(
+              "Folding ", getHeader(node), " to ", output->debugName());
+          node->output()->replaceAllUsesWith(output);
+          changed = true;
+        } else {
+          for (size_t check_none_index : {0, 1}) {
+            bool input_must_be_none =
+                node->inputs().at(check_none_index)->mustBeNone();
+            bool other_must_not_be_none =
+                node->inputs().at(1 - check_none_index)->mustNotBeNone();
+            if (input_must_be_none && other_must_not_be_none) {
+              WithInsertPoint guard(node);
+              auto output = node->owningGraph()->insertConstant(
+                  node->kind() == aten::__isnot__);
+              GRAPH_UPDATE(
+                  "Folding ", getHeader(node), " to ", output->debugName());
+              node->output()->replaceAllUsesWith(output);
+              changed = true;
+            }
           }
         }
       } else if (
