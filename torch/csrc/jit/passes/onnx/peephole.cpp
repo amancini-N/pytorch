@@ -30,6 +30,73 @@ namespace onnx {
 using namespace ::c10::onnx;
 }
 
+namespace {
+
+// Copied from constant_fold.cpp (might want to create a dedicated .h file)
+enum OnnxType : int {
+  ONNX_FLOAT = 1,
+  ONNX_UINT8,
+  ONNX_INT8,
+  ONNX_UINT16,
+  ONNX_INT16,
+  ONNX_INT32,
+  ONNX_INT64,
+  ONNX_BOOL = 9,
+  ONNX_FLOAT16,
+  ONNX_DOUBLE,
+  ONNX_UINT32,
+  ONNX_COMPLEX64 = 14,
+  ONNX_COMPLEX128,
+  ONNX_BFLOAT16,
+};
+
+std::unordered_map<c10::ScalarType, int> scalarTypeToOnnxTypeMap = {
+    // Only conversion of ONNX numeric types is included here.
+    // Unsigned ONNX types are mapped to the next higher signed
+    // ScalarType type.
+    {c10::kFloat, ONNX_FLOAT},
+    {c10::kByte, ONNX_UINT8},
+    {c10::kChar, ONNX_INT8},
+    {c10::kShort, ONNX_INT16},
+    {c10::kInt, ONNX_INT32},
+    {c10::kLong, ONNX_INT64},
+    {c10::kBool, ONNX_BOOL},
+    {c10::kFloat, ONNX_FLOAT16},
+    {c10::kDouble, ONNX_DOUBLE},
+    {c10::kComplexFloat, ONNX_COMPLEX64},
+    {c10::kComplexDouble, ONNX_COMPLEX128},
+    {c10::kBFloat16, ONNX_BFLOAT16},
+};
+
+bool DropONNXUselessCasts(Block* block) {
+  bool changed = false;
+  for (auto it = block->nodes().begin(); it != block->nodes().end(); ++it) {
+    Node* n = *it;
+
+    for (auto inner_block : n->blocks()) {
+      changed |= DropONNXUselessCasts(inner_block);
+    }
+
+    if (n->kind() == onnx::Cast) {
+      auto to_val = n->i(attr::to);
+      auto input_dtype = n->input()->type()->expect<TensorType>()->scalarType();
+      TORCH_INTERNAL_ASSERT(input_dtype.has_value());
+      auto input_onnx_dtype = scalarTypeToOnnxTypeMap.find(input_dtype.value());
+      bool cast_is_useless = input_onnx_dtype != scalarTypeToOnnxTypeMap.end() && input_onnx_dtype->second == to_val;
+      if (cast_is_useless) {
+        n->output()->replaceAllUsesWith(n->input());
+        changed = true;
+      }
+
+    }
+  }
+
+  return changed;
+
+}
+
+}
+
 bool isRNN(const Node* node) {
   auto k = node->kind();
   return k == onnx::RNN || k == onnx::LSTM || k == onnx::GRU;
@@ -1028,13 +1095,13 @@ static void removeSequenceSplitConcat(Block* b) {
   }
 }
 
-// Work around limitation from ONNX that the block input cannot be used directly
+// Work around limitation from ONNX that the block input or value outside of block cannot be used directly
 // as block output. Inserts an Identity node inside the block, and have the
 // block return the output of the Identity.
 static void insertIdentityForInputUsedAsOutput(Block* b) {
   for (auto out : b->outputs()) {
     auto n = out->node();
-    if (nullptr != n && n->kind() == prim::Param) {
+    if (nullptr != n && (n->kind() == prim::Param || n->owningBlock() != b)) {
       Node* id_node = b->owningGraph()->create(onnx::Identity);
       id_node->insertBefore(b->return_node());
       id_node->addInput(out);
@@ -1048,6 +1115,101 @@ static void insertIdentityForInputUsedAsOutput(Block* b) {
       insertIdentityForInputUsedAsOutput(child_block);
     }
   }
+}
+
+// From:
+//   %y = Optional(%x);
+//   %z = OptionalGetElement(%y);
+//   do_something(%z);
+//
+// To:
+//   %y = Optional(%x);
+//   %z = OptionalGetElement(%y);
+//   do_something(%x);
+//
+// OR From:
+//   %y = OptionalGetElement(%x);
+//   %z = Optional(%y);
+//   do_something(%z);
+//
+// To:
+//   %y = OptionalGetElement(%x);
+//   %z = Optional(%y);
+//   do_something(%x);
+//
+// The Optional and OptionalGetElement may now be dead code.
+static void removeDualNodes(Block* b) {
+  for (auto it = b->nodes().begin(), end = b->nodes().end(); it != end; ++it) {
+    for (auto* child_block : it->blocks()) {
+      removeDualNodes(child_block);
+    }
+    bool dual_condition = false;
+    switch (it->kind()) {
+      case onnx::Optional: {
+        dual_condition = it->inputs().size() == 1 && it->input()->node()->kind() == onnx::OptionalGetElement;
+        break;
+      }
+      case onnx::OptionalGetElement: {
+        dual_condition = it->input()->node()->kind() == onnx::Optional && it->input()->node()->inputs().size() == 1;
+        break;
+      }
+      case onnx::Not: {
+        dual_condition = it->input()->node()->kind() == onnx::Not;
+        break;
+      }
+    }
+    if (dual_condition) {
+      it->output()->replaceAllUsesWith(it->input()->node()->input());
+    }
+  }
+}
+
+static void simplifyIdenticalIfs(Block* b) {
+  auto graph = b->owningGraph();
+  for (auto it = b->nodes().begin(), end = b->nodes().end(); it != end; ++it) {
+    for (auto* child_block : it->blocks()) {
+      simplifyIdenticalIfs(child_block);
+    }
+
+    if (it->kind() == onnx::If) {
+      Block* then_branch = it->blocks().at(0);
+      Block* else_branch = it->blocks().at(1);
+      if (then_branch->equivalentTo(else_branch)) {
+        WithInsertPoint guard(*it);
+        std::unordered_map<Value*, Value*> association_map;
+        for (auto inner_block_it = then_branch->nodes().begin(), inner_end = then_branch->nodes().end(); inner_block_it != inner_end; ++inner_block_it) {
+          auto input_map_fn = [&](Value* val) {
+            auto result = association_map.find(val);
+            return result != association_map.end() ? result->second : val;
+          };
+          Node* new_node = graph->createClone(*inner_block_it, input_map_fn);
+          new_node->insertBefore(*it);
+          for (size_t i_out = 0; i_out < new_node->outputs().size(); i_out++) {
+            association_map.insert({inner_block_it->outputs().at(i_out), new_node->outputs().at(i_out)});
+          }
+
+        }
+
+        for (size_t i_if_out = 0; i_if_out < then_branch->outputs().size(); i_if_out++) {
+          auto new_output = association_map.find(then_branch->outputs().at(i_if_out));
+          TORCH_INTERNAL_ASSERT(new_output != association_map.end());
+          it->outputs().at(i_if_out)->replaceAllUsesWith(new_output->second);
+        }
+      }
+    }
+  }
+}
+
+bool DropONNXUselessCasts(const std::shared_ptr<Graph>& graph) {
+    bool changed = DropONNXUselessCasts(graph->block());
+    if (changed) {
+      EliminateDeadCode(
+        graph->block(),
+        true,
+        DCESideEffectPolicy::ALLOW_DELETING_NODES_WITH_SIDE_EFFECTS);
+      insertIdentityForInputUsedAsOutput(graph->block());
+    }
+    return changed;
 }
 
 // This optimization does ONNX-specific peephole optimizations.
@@ -1082,6 +1244,7 @@ void PeepholeOptimizeONNX(
   fuseLogSoftmaxNllLoss(graph->block());
   eraseListConstruct(graph->block(), opset_version);
   eraseTupleConstruct(graph->block());
+  removeDualNodes(graph->block());
   EliminateDeadCode(
       graph->block(),
       true,
@@ -1089,6 +1252,8 @@ void PeepholeOptimizeONNX(
   eraseListUnpack(graph->block(), opset_version);
   removeMaxPoolUnusedOutput(graph->block());
   removeSequenceSplitConcat(graph->block());
+  insertIdentityForInputUsedAsOutput(graph->block());
+  simplifyIdenticalIfs(graph->block());
   insertIdentityForInputUsedAsOutput(graph->block());
 
   GRAPH_DUMP("After PeepholeOptimizeONNX", graph);

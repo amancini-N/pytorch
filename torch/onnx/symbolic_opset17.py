@@ -247,7 +247,7 @@ def pad_sequence(g: jit_utils.GraphContext, self, batch_first, padding_value):
     )
 
     if padding_value.type().dtype() != bl_input.type().dtype():
-        padding_value = padding_value = block_ctx.op("Cast", padding_value, to_i=_type_utils.JitScalarType.from_dtype(bl_input.type().dtype()).onnx_type())
+        padding_value = block_ctx.op("Cast", padding_value, to_i=_type_utils.JitScalarType.from_dtype(bl_input.type().dtype()).onnx_type())
     padded_t = block_ctx.op("Pad", bl_input, to_pad, padding_value)
     block_ctx.block.registerOutput(padded_t)
 

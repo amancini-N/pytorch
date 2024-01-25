@@ -7,6 +7,7 @@
 #include <torch/csrc/Exceptions.h>
 #include <torch/csrc/jit/passes/onnx.h>
 #include <torch/csrc/jit/passes/onnx/cast_all_constant_to_floating.h>
+#include <torch/csrc/jit/passes/onnx/common_subexpression_elimination.h>
 #include <torch/csrc/jit/passes/onnx/constant_fold.h>
 #include <torch/csrc/jit/passes/onnx/deduplicate_initializers.h>
 #include <torch/csrc/jit/passes/onnx/eliminate_unused_items.h>
@@ -246,7 +247,19 @@ void initONNXBindings(PyObject* module) {
           "_jit_onnx_create_full_scope_name",
           ::torch::wrap_pybind_function(
               ::torch::jit::onnx::ONNXScopeName::createFullScopeName),
-          "Create a full scope name from class name and variable name.");
+          "Create a full scope name from class name and variable name.")
+      .def(
+          "_jit_pass_onnx_cse",
+          [](std::shared_ptr<Graph>& graph) {
+            return ::torch::jit::onnx_cse::EliminateONNXCommonSubexpression(graph);
+          },
+          py::arg("graph"))
+      .def(
+          "_jit_pass_onnx_drop_useless_casts",
+          [](std::shared_ptr<Graph>& graph) {
+            return ::torch::jit::DropONNXUselessCasts(graph);
+          },
+          py::arg("graph"));
 
   m.def(
       "_check_onnx_proto",

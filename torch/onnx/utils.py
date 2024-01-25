@@ -688,6 +688,10 @@ def _optimize_graph(
     )
     _C._jit_pass_lint(graph)
 
+    # Another pass of CSE, we might have duplicated patterns after symbolic construction
+    if _C._jit_pass_onnx_cse(graph):
+        _C._jit_pass_onnx_lint(graph)
+
     # graph is not a valid jit graph anymore because types have been replaced
     # (e.g. int with Tensor), so it now contains operators that don't actually
     # exist. We can't run normal dead code elimination because it'd fail trying
@@ -710,6 +714,9 @@ def _optimize_graph(
             ):
                 # Caffe2 builds can have UNKNOWN_SCALAR for some tensors
                 pass
+
+    if _C._jit_pass_onnx_drop_useless_casts(graph):
+        _C._jit_pass_onnx_lint(graph)
 
     return graph
 

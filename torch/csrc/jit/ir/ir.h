@@ -1157,6 +1157,94 @@ struct Block {
     removeAllInputs();
   }
 
+  bool equivalentTo(const Block* other_block) const {
+    std::unordered_map<const Value*, const Value*> first_map;
+    return equivalentTo(other_block, first_map);
+  }
+
+  bool equivalentTo(const Block* other_block, const std::unordered_map<const Value*, const Value*>& upper_map) const {
+    if (inputs().size() != other_block->inputs().size() || outputs().size() != other_block->outputs().size()) {
+      return false;
+    }
+    //Check input types
+    for (size_t i = 0; i < inputs().size(); ++i) {
+      auto this_type = inputs().at(i)->type();
+      auto other_type = other_block->inputs().at(i)->type();
+      if (this_type != other_type) {
+        return false;
+      }
+    }
+    // order_fn compares 2 nodes to establish a common ordering against
+    // unconstrained nodes.
+    auto order_fn = [&](const Node* a, const Node* b) {
+      if (a->kind() != b->kind()) {
+        return a->kind().toUnqualString() > b->kind().toUnqualString();
+      }
+      if (a->inputs().size() != b->inputs().size()) {
+        return a->inputs().size() > b->inputs().size();
+      }
+      for (size_t i = 0; i < a->inputs().size(); i++) {
+        if (a->inputs().at(i)->unique() != b->inputs().at(i)->unique()) {
+          return a->inputs().at(i)->unique() > b->inputs().at(i)->unique();
+        }
+      }
+      return false;
+    };
+    auto it_this = nodes().begin();
+    auto it_other = other_block->nodes().begin();
+    auto end_this = nodes().end();
+    auto end_other = other_block->nodes().end();
+    std::unordered_map<const Value*, const Value*> local_map(upper_map);
+    while (true) {
+      if (it_this == end_this || it_other == end_other) {
+        if (it_this == end_this && it_other == end_other) {
+          break;
+        }
+        else {
+          return false;
+        }
+      }
+      const Node* n_this = *it_this++;
+      const Node* n_other = *it_other++;
+
+      if (n_this->kind() != n_other->kind() ||
+          n_this->inputs().size() != n_other->inputs().size() ||
+          n_this->outputs().size() != n_other->outputs().size() ||
+          n_this->numAttributes() != n_other->numAttributes()) {
+        return false;
+      }
+      // Recursively check blocks of nodes
+      if (n_this->blocks().size() != n_other->blocks().size()) {
+        return false;
+      }
+      for (size_t i = 0; n_this->blocks().size(); ++i) {
+        const Block* n_this_block = n_this->blocks().at(i);
+        const Block* n_other_block = n_other->blocks().at(i);
+        if (!n_this_block->equivalentTo(n_other_block, local_map)) {
+          return false;
+        }
+      }
+
+
+      for (size_t i = 0; i < n_this->inputs().size(); ++i) {
+        const Value* input_this = n_this->inputs().at(i);
+        const Value* input_other = n_other->inputs().at(i);
+        if (input_this != input_other) {
+          auto lookup_result = local_map.find(input_this);
+          if (lookup_result == local_map.end() || lookup_result->second != input_other) {
+            return false;
+          }
+        }
+      }
+
+      for (size_t i = 0; i < n_this->outputs().size(); i++) {
+        local_map.insert({n_this->outputs().at(i), n_other->outputs().at(i)});
+      }
+    }
+
+    return true;
+  }
+
  private:
   void reIndexTopology();
 

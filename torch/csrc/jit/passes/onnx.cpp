@@ -336,6 +336,7 @@ void NodeToONNX(
           auto old_type_as_list = old->type()->cast<ListType>();
           bool do_merge = true;
           if (old_type_as_list) {
+            // TODO cast doesn't support class hierarchy..
             auto old_list_element_type_as_number = old_type_as_list->getElementType()->cast<IntType>();
             if (old_list_element_type_as_number) {
               do_merge = false;
